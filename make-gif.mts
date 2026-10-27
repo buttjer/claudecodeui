@@ -276,12 +276,36 @@ async function record(base: string, token: string): Promise<{ file: string; t: n
     await context.addInitScript((t: string) => window.localStorage.setItem('auth-token', t), token);
     await context.addInitScript(installFingerDot);
     const page = await context.newPage();
+    const cdp = await context.newCDPSession(page);
+    // A real phone matches neither (hover: hover) nor (pointer: fine), so the
+    // send menu's keyboard hints (behind that query) stay hidden. Try to make
+    // the page agree, without switching input to touch: Emulation.setTouchEmulationEnabled
+    // would flip hover/pointer too, but it also turns off :hover-on-mouse-move,
+    // which this recorder's mouse-driven hover highlighting and finger dot need.
+    try {
+      await cdp.send('Emulation.setEmulatedMedia', {
+        features: [
+          { name: 'hover', value: 'none' },
+          { name: 'any-hover', value: 'none' },
+          { name: 'pointer', value: 'coarse' },
+          { name: 'any-pointer', value: 'coarse' },
+        ],
+      });
+    } catch (error) {
+      console.error('Emulation.setEmulatedMedia threw; recording without it:', error);
+    }
     await simulateBusySession(page);
     await page.goto(`${base}/session/${SID}`, { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(3000);
+    // setEmulatedMedia's override list is the prefers-*/forced-colors style
+    // features; Chromium 151 silently ignores hover/pointer/any-hover/any-pointer
+    // names in it rather than erroring, so check whether it actually took.
+    const stillHoverable = await page.evaluate(() => matchMedia('(hover: hover) and (pointer: fine)').matches);
+    if (stillHoverable) {
+      console.error('Chromium ignored the hover/pointer media-feature override; the send menu will still show its keyboard hints.');
+    }
 
     const frames: { file: string; t: number }[] = [];
-    const cdp = await context.newCDPSession(page);
     let capturing = true;
     const capture = (async () => {
       while (capturing) {
