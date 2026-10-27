@@ -1,6 +1,6 @@
 /**
- * Records btw-side-question.gif on a phone, cropped to the lower half of the
- * screen: a BTW side question while a turn is being written (the send menu
+ * Records side-questions.gif on a phone, cropped to the lower half of the
+ * screen: a side question while a turn is being written (the send menu
  * ends in Stop), then the turn ends with its tests left running in the
  * background and a second one is asked (the menu ends in Send anyway).
  *
@@ -15,9 +15,11 @@
  * DATABASE_PATH says, and a seeded demo session with a demo login. The busy
  * states and the answers are simulated in the browser: the running-sessions
  * poll and the chat socket are answered there, and no fork is run, since the
- * throwaway HOME has no Claude login. Each simulated side question is also
- * written to the throwaway database, as the real server does, so a history
- * reload keeps it.
+ * throwaway HOME has no Claude login. Side questions now live only in the
+ * server's memory (no table), so the simulated answer is fed straight into
+ * the page's own side-question store through the same `side_question` wire
+ * event the real server would send; that store, not a server reload, is
+ * what keeps the aside on screen afterwards.
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -35,7 +37,6 @@ if (!checkoutArg || !outArg) {
 const CHECKOUT = resolve(checkoutArg);
 const OUT = resolve(outArg);
 const { chromium } = createRequire(join(resolve(process.env.PLAYWRIGHT_FROM ?? CHECKOUT), 'noop.js'))('playwright-core');
-const Database = createRequire(join(CHECKOUT, 'noop.js'))('better-sqlite3');
 
 const VIEWPORT = { width: 390, height: 844 };
 // The lower half of the phone screen at 2x. The CDP screencast only delivers
@@ -57,7 +58,7 @@ const TASK_ID = 'bg_tests_1';
 const TOOL_INPUT = { command: 'npm test', description: 'Run the tests', run_in_background: true };
 const CLOSING_TEXT = 'Each error now sits under its own field. The tests are running in the background.';
 
-const WORK = mkdtempSync(join(tmpdir(), 'btw-gif-'));
+const WORK = mkdtempSync(join(tmpdir(), 'side-question-gif-'));
 const HOME = join(WORK, 'home');
 const PROJECT = join(WORK, 'project', 'demo-app');
 const FRAMES = join(WORK, 'frames');
@@ -218,28 +219,18 @@ async function streamAnswer(ws: any, frame: any): Promise<void> {
   const event = (phase: string, extra: object) => JSON.stringify({
     kind: 'side_question', sessionId: frame.sessionId, sideQuestionId: frame.sideQuestionId, phase, timestamp: now(), ...extra,
   });
-  // The row the real server keeps: a turn's `complete` reloads history, and
-  // history brings the side questions from this table.
-  const db = new Database(DATABASE);
+  // Claude answers a side question in one piece (a CLI turn, not a token
+  // stream): the pending shimmer, then the whole text at once, never a
+  // word-by-word delta.
   await sleep(250);
-  db.prepare('INSERT INTO side_questions (id, session_id, question, answer, status, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(frame.sideQuestionId, frame.sessionId, frame.question, '', 'running', 'claude-sonnet-5', createdAt);
   ws.send(event('started', { sideQuestion: row('', 'running') }));
-  await sleep(1400); // the fork reads the conversation before it writes
-  for (const word of answer.split(/(?<= )/)) {
-    ws.send(event('delta', { text: word }));
-    await sleep(70);
-  }
-  await sleep(150);
-  const done = row(answer, 'done');
-  db.prepare('UPDATE side_questions SET answer = ?, status = ?, finished_at = ? WHERE id = ?').run(answer, 'done', done.finishedAt, frame.sideQuestionId);
-  db.close();
-  ws.send(event('done', { sideQuestion: done }));
+  await sleep(2200); // the fork reads the conversation and writes the answer
+  ws.send(event('done', { sideQuestion: row(answer, 'done') }));
 }
 
 // The poll reports the turn, then only its tests; the subscribe ack is
-// turned busy and a status line follows it. `chat.btw` never reaches the
-// server.
+// turned busy and a status line follows it. `chat.side_question` never
+// reaches the server.
 async function simulateBusySession(page: any): Promise<void> {
   await page.route('**/api/providers/sessions/running*', (route: any) => route.fulfill({
     status: 200, contentType: 'application/json',
@@ -272,7 +263,7 @@ async function simulateBusySession(page: any): Promise<void> {
     ws.onMessage((frame: any) => {
       let data: any = null;
       try { data = JSON.parse(String(frame)); } catch { /* not JSON */ }
-      if (data?.type === 'chat.btw') void streamAnswer(ws, data);
+      if (data?.type === 'chat.side_question') void streamAnswer(ws, data);
       else server.send(frame);
     });
   });
@@ -340,7 +331,7 @@ async function record(base: string, token: string): Promise<{ file: string; t: n
       await glide(386, at.y - 60, 500);
     };
 
-    // Type, open the send menu, pass over its red last item and Queue, take BTW.
+    // Type, open the send menu, pass over its red last item and Queue, take Side question.
     const askOnTheSide = async (question: string, lastItem: 'Stop' | 'Send anyway') => {
       const field = await centre(page.locator('textarea').first());
       await glide(field.x - 60, field.y, 700);
@@ -357,12 +348,12 @@ async function record(base: string, token: string): Promise<{ file: string; t: n
 
       const last = await centre(item(lastItem));
       const queue = await centre(item('Queue'));
-      const btw = await centre(item('BTW'));
+      const sideQuestion = await centre(item('Side question'));
       await glide(last.x + 30, last.y, 450);
       await page.waitForTimeout(800);
       await glide(queue.x + 10, queue.y, 500);
       await page.waitForTimeout(700);
-      await glide(btw.x, btw.y, 350);
+      await glide(sideQuestion.x, sideQuestion.y, 350);
       await page.waitForTimeout(700);
       await tap();
 
